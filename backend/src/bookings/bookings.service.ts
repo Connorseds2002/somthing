@@ -1,13 +1,12 @@
 import { Injectable, ConflictException, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { v4 as uuidv4 } from 'uuid';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Booking } from './entities/booking.entity';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
 
 @Injectable()
 export class BookingsService {
-  private bookings: Booking[] = [];
-
   private readonly positions = [
     { icao: 'EGLL', name: 'London Heathrow', positions: ['TWR', 'APP', 'GND', 'DEL'] },
     { icao: 'LFPG', name: 'Paris Charles de Gaulle', positions: ['TWR', 'APP', 'GND', 'DEL'] },
@@ -17,45 +16,44 @@ export class BookingsService {
     { icao: 'LIRF', name: 'Rome Fiumicino', positions: ['TWR', 'APP', 'GND', 'DEL'] },
   ];
 
+  constructor(
+    @InjectRepository(Booking)
+    private readonly bookingRepository: Repository<Booking>,
+  ) {}
+
   private isFuture(booking: Booking): boolean {
     return booking.startTime > new Date();
   }
 
-  private hasTimeOverlap(aStart: Date, aEnd: Date, bStart: Date, bEnd: Date): boolean {
-    return aStart < bEnd && aEnd > bStart;
-  }
-
-  findAll(filters?: { future?: boolean; date?: string }): Booking[] {
-    let result = [...this.bookings];
+  async findAll(filters?: { future?: boolean; date?: string }): Promise<Booking[]> {
+    const qb = this.bookingRepository.createQueryBuilder('booking');
 
     if (filters?.future) {
-      const now = new Date();
-      result = result.filter((b) => b.endTime > now);
+      qb.andWhere('booking.endTime > :now', { now: new Date() });
     }
 
     if (filters?.date) {
       const filterDate = new Date(filters.date);
       const startOfDay = new Date(filterDate.getFullYear(), filterDate.getMonth(), filterDate.getDate(), 0, 0, 0);
       const endOfDay = new Date(filterDate.getFullYear(), filterDate.getMonth(), filterDate.getDate(), 23, 59, 59, 999);
-      result = result.filter((b) => b.startTime <= endOfDay && b.endTime >= startOfDay);
+      qb.andWhere('booking.startTime <= :endOfDay', { endOfDay });
+      qb.andWhere('booking.endTime >= :startOfDay', { startOfDay });
     }
 
-    return result.sort((a, b) => {
-      const posCompare = a.position.localeCompare(b.position);
-      if (posCompare !== 0) return posCompare;
-      return a.startTime.getTime() - b.startTime.getTime();
-    });
+    qb.orderBy('booking.position', 'ASC').addOrderBy('booking.startTime', 'ASC');
+
+    return qb.getMany();
   }
 
-  findOne(id: string): Booking {
-    const booking = this.bookings.find((b) => b.id === id);
+  async findOne(id: string): Promise<Booking> {
+    const booking = await this.bookingRepository.findOne({ where: { id } });
     if (!booking) {
       throw new NotFoundException(`Booking with id "${id}" not found`);
     }
     return booking;
   }
 
-  create(dto: CreateBookingDto): Booking {
+  async create(dto: CreateBookingDto): Promise<Booking> {
     const startTime = new Date(dto.startTime);
     const endTime = new Date(dto.endTime);
 
@@ -63,40 +61,41 @@ export class BookingsService {
       throw new ConflictException('End time must be after start time');
     }
 
-    const positionConflict = this.bookings.some((b) => {
-      if (b.position !== dto.position) return false;
-      return this.hasTimeOverlap(startTime, endTime, b.startTime, b.endTime);
-    });
+    const positionConflict = await this.bookingRepository
+      .createQueryBuilder('booking')
+      .where('booking.position = :position', { position: dto.position })
+      .andWhere('booking.startTime < :endTime', { endTime })
+      .andWhere('booking.endTime > :startTime', { startTime })
+      .getOne();
 
     if (positionConflict) {
       throw new ConflictException('This position is already booked for the selected time range');
     }
 
-    const userConflict = this.bookings.some((b) => {
-      if (b.vid !== dto.vid) return false;
-      return this.hasTimeOverlap(startTime, endTime, b.startTime, b.endTime);
-    });
+    const userConflict = await this.bookingRepository
+      .createQueryBuilder('booking')
+      .where('booking.vid = :vid', { vid: dto.vid })
+      .andWhere('booking.startTime < :endTime', { endTime })
+      .andWhere('booking.endTime > :startTime', { startTime })
+      .getOne();
 
     if (userConflict) {
       throw new ConflictException('You already have another booking at the same time');
     }
 
-    const booking: Booking = {
-      id: uuidv4(),
+    const booking = this.bookingRepository.create({
       vid: dto.vid,
       callsign: dto.callsign,
       position: dto.position,
       startTime,
       endTime,
-      createdAt: new Date(),
-    };
+    });
 
-    this.bookings.push(booking);
-    return booking;
+    return this.bookingRepository.save(booking);
   }
 
-  update(id: string, vid: string, dto: UpdateBookingDto): Booking {
-    const booking = this.findOne(id);
+  async update(id: string, vid: string, dto: UpdateBookingDto): Promise<Booking> {
+    const booking = await this.findOne(id);
 
     if (booking.vid !== vid) {
       throw new ForbiddenException('You can only edit your own bookings');
@@ -116,21 +115,25 @@ export class BookingsService {
       }
     }
 
-    const positionConflict = this.bookings.some((b) => {
-      if (b.id === id) return false;
-      if (b.position !== newPosition) return false;
-      return this.hasTimeOverlap(newStart, newEnd, b.startTime, b.endTime);
-    });
+    const positionConflict = await this.bookingRepository
+      .createQueryBuilder('booking')
+      .where('booking.position = :position', { position: newPosition })
+      .andWhere('booking.id != :id', { id })
+      .andWhere('booking.startTime < :endTime', { endTime: newEnd })
+      .andWhere('booking.endTime > :startTime', { startTime: newStart })
+      .getOne();
 
     if (positionConflict) {
       throw new ConflictException('This position is already booked for the selected time range');
     }
 
-    const userConflict = this.bookings.some((b) => {
-      if (b.id === id) return false;
-      if (b.vid !== vid) return false;
-      return this.hasTimeOverlap(newStart, newEnd, b.startTime, b.endTime);
-    });
+    const userConflict = await this.bookingRepository
+      .createQueryBuilder('booking')
+      .where('booking.vid = :vid', { vid })
+      .andWhere('booking.id != :id', { id })
+      .andWhere('booking.startTime < :endTime', { endTime: newEnd })
+      .andWhere('booking.endTime > :startTime', { startTime: newStart })
+      .getOne();
 
     if (userConflict) {
       throw new ConflictException('You already have another booking at the same time');
@@ -140,11 +143,11 @@ export class BookingsService {
     booking.startTime = newStart;
     booking.endTime = newEnd;
 
-    return booking;
+    return this.bookingRepository.save(booking);
   }
 
-  remove(id: string, vid: string): void {
-    const booking = this.findOne(id);
+  async remove(id: string, vid: string): Promise<void> {
+    const booking = await this.findOne(id);
 
     if (booking.vid !== vid) {
       throw new ForbiddenException('You can only delete your own bookings');
@@ -154,8 +157,7 @@ export class BookingsService {
       throw new ForbiddenException('You can only delete future bookings');
     }
 
-    const index = this.bookings.findIndex((b) => b.id === id);
-    this.bookings.splice(index, 1);
+    await this.bookingRepository.remove(booking);
   }
 
   getPositions() {

@@ -9,7 +9,7 @@ export class BookingsController {
   constructor(private readonly bookingsService: BookingsService) {}
 
   @Get()
-  findAll(@Query('future') future?: string, @Query('date') date?: string): Booking[] {
+  async findAll(@Query('future') future?: string, @Query('date') date?: string): Promise<Booking[]> {
     return this.bookingsService.findAll({
       future: future === 'true',
       date,
@@ -18,12 +18,12 @@ export class BookingsController {
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() dto: CreateBookingDto): Booking {
+  async create(@Body() dto: CreateBookingDto): Promise<Booking> {
     return this.bookingsService.create(dto);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Query('vid') vid: string, @Body() dto: UpdateBookingDto): Booking {
+  async update(@Param('id') id: string, @Query('vid') vid: string, @Body() dto: UpdateBookingDto): Promise<Booking> {
     return this.bookingsService.update(id, vid, dto);
   }
 
